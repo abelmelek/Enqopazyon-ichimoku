@@ -21,6 +21,52 @@ function getAIClient() {
   });
 }
 
+async function getMetaApiRegion(accountId: string, token: string): Promise<string> {
+  const cacheKey = `metaapi_region_${accountId}`;
+  if ((global as any)[cacheKey]) {
+    return (global as any)[cacheKey];
+  }
+
+  // Central Account Config lookup
+  try {
+    const configUrl = `https://metaapi-api-v1.new-york.metaapi.cloud/users/current/accounts/${accountId}`;
+    const res = await axios.get(configUrl, {
+      headers: { 'auth-token': token },
+      timeout: 4000
+    });
+    if (res.status === 200 && res.data && res.data.region) {
+      const discoveredRegion = res.data.region;
+      console.log(`[MetaAPI Region Discovery] Discovered region ${discoveredRegion} for account ${accountId}`);
+      (global as any)[cacheKey] = discoveredRegion;
+      return discoveredRegion;
+    }
+  } catch (err: any) {
+    console.warn(`[MetaAPI Region Discovery] Central lookup failed for ${accountId}: ${err.message}. Probing regions...`);
+  }
+
+  // Active testing probe fallback
+  const regions = ['new-york', 'london', 'singapore'];
+  for (const r of regions) {
+    try {
+      const probeUrl = `https://mt-client-api-v1.${r}.metaapi.cloud/users/current/accounts/${accountId}/account-information`;
+      const res = await axios.get(probeUrl, {
+        headers: { 'auth-token': token },
+        timeout: 2500
+      });
+      if (res.status === 200) {
+        console.log(`[MetaAPI Region Discovery] Probe succeeded for region ${r}`);
+        (global as any)[cacheKey] = r;
+        return r;
+      }
+    } catch (e) {
+      // Try next region
+    }
+  }
+
+  // Default fallback to new-york if all else fails
+  return 'new-york';
+}
+
 async function fetchCurrentSpotPrice(symbol: string): Promise<number | null> {
   const normSym = symbol.toUpperCase().trim();
   
@@ -41,8 +87,10 @@ async function fetchCurrentSpotPrice(symbol: string): Promise<number | null> {
         metaSymbol = 'USDJPY';
       }
 
+      const region = await getMetaApiRegion(metaAccountId, metaToken);
+
       const fetchMetaPrice = async (sym: string): Promise<number | null> => {
-        const url = `https://mt-market-data-client-api-v1.new-york.metaapi.cloud/users/current/accounts/${metaAccountId}/historical-market-data/symbols/${encodeURIComponent(sym)}/candles?timeframe=1m&limit=1`;
+        const url = `https://mt-market-data-client-api-v1.${region}.metaapi.cloud/users/current/accounts/${metaAccountId}/historical-market-data/symbols/${encodeURIComponent(sym)}/candles?timeframe=1m&limit=1`;
         const res = await axios.get(url, {
           headers: { 'auth-token': metaToken, 'Accept': 'application/json' },
           timeout: 4000
@@ -167,8 +215,10 @@ async function fetchCandlesFromMetaAPI(
   };
   const tf = timeframeMap[timeframe] || '1h';
 
+  const region = await getMetaApiRegion(accountId, token);
+
   const fetchDirectSymbols = async (sym: string): Promise<any[] | null> => {
-    const url = `https://mt-market-data-client-api-v1.new-york.metaapi.cloud/users/current/accounts/${accountId}/historical-market-data/symbols/${encodeURIComponent(sym)}/candles`;
+    const url = `https://mt-market-data-client-api-v1.${region}.metaapi.cloud/users/current/accounts/${accountId}/historical-market-data/symbols/${encodeURIComponent(sym)}/candles`;
     const response = await axios.get(url, {
       params: {
         timeframe: tf,
@@ -612,8 +662,9 @@ async function startServer() {
     if (metaApiToken && metaApiAccountId) {
       try {
         console.log(`[MT5 Proxy] Contacting MetaAPI for account ${metaApiAccountId}`);
+        const region = await getMetaApiRegion(metaApiAccountId, metaApiToken);
         const response = await axios.get(
-          `https://mt-client-api-v1.new-york.metaapi.cloud/users/current/accounts/${metaApiAccountId}/account-information`,
+          `https://mt-client-api-v1.${region}.metaapi.cloud/users/current/accounts/${metaApiAccountId}/account-information`,
           {
             headers: {
               'auth-token': metaApiToken,
