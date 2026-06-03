@@ -21,6 +21,250 @@ function getAIClient() {
   });
 }
 
+async function fetchCurrentSpotPrice(symbol: string): Promise<number | null> {
+  const normSym = symbol.toUpperCase().trim();
+  
+  // Try to use cached MT5 MetaAPI credentials if available!
+  const metaToken = (global as any).lastMetaApiToken;
+  const metaAccountId = (global as any).lastMetaApiAccountId;
+
+  if (metaToken && metaAccountId) {
+    try {
+      let metaSymbol = normSym;
+      if (normSym === 'PAXGUSDT' || normSym === 'GOLD') {
+        metaSymbol = 'XAUUSD';
+      } else if (normSym === 'BTCUSDT') {
+        metaSymbol = 'BTCUSD';
+      } else if (normSym === 'EURUSDT') {
+        metaSymbol = 'EURUSD';
+      } else if (normSym === 'USDTJPY') {
+        metaSymbol = 'USDJPY';
+      }
+
+      const fetchMetaPrice = async (sym: string): Promise<number | null> => {
+        const url = `https://mt-market-data-client-api-v1.new-york.metaapi.cloud/users/current/accounts/${metaAccountId}/historical-market-data/symbols/${encodeURIComponent(sym)}/candles?timeframe=1m&limit=1`;
+        const res = await axios.get(url, {
+          headers: { 'auth-token': metaToken, 'Accept': 'application/json' },
+          timeout: 4000
+        });
+        if (res.status === 200 && Array.isArray(res.data) && res.data.length > 0) {
+          return parseFloat(res.data[0].close) || null;
+        }
+        return null;
+      };
+
+      if (metaSymbol === 'DXY') {
+        // Try DXY directly first
+        try {
+          const dxyPrice = await fetchMetaPrice('DXY');
+          if (dxyPrice) return dxyPrice;
+        } catch (e) {
+          // If direct DXY is missing, calculate DXY using MT5 EURUSD and USDJPY!
+          const eur = await fetchMetaPrice('EURUSD') || 1.0820;
+          const jpy = await fetchMetaPrice('USDJPY') || 156.80;
+          const gbp = await fetchMetaPrice('GBPUSD') || 1.2720;
+          const cad = 1.3650; // default fallbacks for minor DXY weights
+          const sek = 10.45;
+          const chf = 0.8950;
+          const calculatedDxy = 50.14348112 * 
+            Math.pow(eur, -0.576) * 
+            Math.pow(jpy, 0.136) * 
+            Math.pow(gbp, -0.119) * 
+            Math.pow(cad, 0.091) * 
+            Math.pow(sek, 0.042) * 
+            Math.pow(chf, 0.036);
+          return calculatedDxy;
+        }
+      } else {
+        const price = await fetchMetaPrice(metaSymbol);
+        if (price) {
+          return price;
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[Spot Price Fetcher MT5] Failed to fetch MT5 price for ${normSym} via MetaAPI: ${err.message}. Falling back to public Web APIs.`);
+    }
+  }
+
+  try {
+    if (normSym === 'BTCUSD' || normSym === 'BTCUSDT' || normSym === 'BTC') {
+      const response = await axios.get('https://api.coinbase.com/v2/prices/BTC-USD/spot', { timeout: 3000 });
+      if (response.data && response.data.data && response.data.data.amount) {
+        return parseFloat(response.data.data.amount) || null;
+      }
+    }
+    
+    if (normSym === 'XAUUSD' || normSym === 'PAXGUSDT' || normSym === 'GOLD') {
+      const response = await axios.get('https://api.coinbase.com/v2/prices/PAXG-USD/spot', { timeout: 3000 });
+      if (response.data && response.data.data && response.data.data.amount) {
+        return parseFloat(response.data.data.amount) || null;
+      }
+    }
+    
+    if (normSym === 'EURUSD' || normSym === 'EURUSDT' || normSym === 'USDJPY' || normSym === 'DXY' || normSym === 'EUR' || normSym === 'JPY') {
+      const response = await axios.get('https://open.er-api.com/v6/latest/USD', { timeout: 3000 });
+      if (response.data && response.data.result === 'success' && response.data.rates) {
+        const rates = response.data.rates;
+        if (normSym === 'USDJPY') {
+          return rates.JPY || null;
+        }
+        if (normSym === 'EURUSD' || normSym === 'EURUSDT') {
+          return rates.EUR ? (1 / rates.EUR) : null;
+        }
+        if (normSym === 'DXY') {
+          const eur = rates.EUR ? (1 / rates.EUR) : 1.0845;
+          const jpy = rates.JPY || 156.65;
+          const gbp = rates.GBP ? (1 / rates.GBP) : 1.2720;
+          const cad = rates.CAD || 1.3650;
+          const sek = rates.SEK || 10.45;
+          const chf = rates.CHF || 0.8950;
+          const dxy = 50.14348112 * 
+            Math.pow(eur, -0.576) * 
+            Math.pow(jpy, 0.136) * 
+            Math.pow(gbp, -0.119) * 
+            Math.pow(cad, 0.091) * 
+            Math.pow(sek, 0.042) * 
+            Math.pow(chf, 0.036);
+          return dxy || null;
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Spot Price Fetcher] Failed to fetch live spot price for ${normSym} from public endpoints: ${err.message}`);
+  }
+  return null;
+}
+
+async function fetchCandlesFromMetaAPI(
+  accountId: string,
+  token: string,
+  symbol: string,
+  timeframe: string,
+  limit: number
+): Promise<any[] | null> {
+  const normSym = symbol.toUpperCase().trim();
+  let metaSymbol = normSym;
+  if (normSym === 'PAXGUSDT' || normSym === 'GOLD') {
+    metaSymbol = 'XAUUSD';
+  } else if (normSym === 'BTCUSDT') {
+    metaSymbol = 'BTCUSD';
+  } else if (normSym === 'EURUSDT') {
+    metaSymbol = 'EURUSD';
+  } else if (normSym === 'USDTJPY') {
+    metaSymbol = 'USDJPY';
+  }
+
+  // MetaAPI offers timeframes: '1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'
+  let timeframeMap: Record<string, string> = {
+    '1m': '1m',
+    '5m': '5m',
+    '15m': '15m',
+    '30m': '30m',
+    '1h': '1h',
+    '4h': '4h',
+    '1d': '1d',
+    '1w': '1w'
+  };
+  const tf = timeframeMap[timeframe] || '1h';
+
+  const fetchDirectSymbols = async (sym: string): Promise<any[] | null> => {
+    const url = `https://mt-market-data-client-api-v1.new-york.metaapi.cloud/users/current/accounts/${accountId}/historical-market-data/symbols/${encodeURIComponent(sym)}/candles`;
+    const response = await axios.get(url, {
+      params: {
+        timeframe: tf,
+        limit: limit
+      },
+      headers: {
+        'auth-token': token,
+        'Accept': 'application/json'
+      },
+      timeout: 10000
+    });
+
+    if (response.status === 200 && Array.isArray(response.data)) {
+      return response.data;
+    }
+    return null;
+  };
+
+  try {
+    let rawCandles: any[] | null = null;
+    
+    if (metaSymbol === 'DXY') {
+      // Fetch DXY from MT5 if available. If missing, aggregate using EURUSD, USDJPY and GBPUSD!
+      try {
+        rawCandles = await fetchDirectSymbols('DXY');
+      } catch (e) {
+        console.log(`[MT5 Market Data] MT5 lacks direct index DXY. Dynamically calculating DXY candles using EURUSD & USDJPY.`);
+        const eurCandles = await fetchDirectSymbols('EURUSD');
+        const jpyCandles = await fetchDirectSymbols('USDJPY');
+        const gbpCandles = await fetchDirectSymbols('GBPUSD');
+
+        if (eurCandles && jpyCandles) {
+          const minLen = Math.min(eurCandles.length, jpyCandles.length);
+          rawCandles = [];
+          for (let i = 0; i < minLen; i++) {
+            const ec = eurCandles[i];
+            const jc = jpyCandles[i];
+            const gc = gbpCandles && gbpCandles[i] ? gbpCandles[i] : { open: 1.2720, high: 1.2720, low: 1.2720, close: 1.2720 };
+            
+            const mapToDxy = (eurVal: number, jpyVal: number, gbpVal: number) => {
+              const eur = 1 / eurVal;
+              const jpy = jpyVal;
+              const gbp = 1 / gbpVal;
+              const cad = 1.3650;
+              const sek = 10.45;
+              const chf = 0.8950;
+              return 50.14348112 * 
+                Math.pow(eur, -0.576) * 
+                Math.pow(jpy, 0.136) * 
+                Math.pow(gbp, -0.119) * 
+                Math.pow(cad, 0.091) * 
+                Math.pow(sek, 0.042) * 
+                Math.pow(chf, 0.036);
+            };
+
+            rawCandles.push({
+              time: ec.time,
+              open: mapToDxy(ec.open, jc.open, gc.open),
+              high: mapToDxy(ec.high, jc.high, gc.high),
+              low: mapToDxy(ec.low, jc.low, gc.low),
+              close: mapToDxy(ec.close, jc.close, gc.close),
+              tickVolume: ec.tickVolume || 100
+            });
+          }
+        }
+      }
+    } else {
+      rawCandles = await fetchDirectSymbols(metaSymbol);
+    }
+
+    if (rawCandles && rawCandles.length > 0) {
+      const binanceKlines = rawCandles.map((candle: any) => {
+        const t = candle.time ? new Date(candle.time).getTime() : Date.now();
+        return [
+          t,
+          String(candle.open),
+          String(candle.high),
+          String(candle.low),
+          String(candle.close),
+          String(candle.tickVolume || candle.volume || 100),
+          t + 60000 - 1,
+          "100",
+          100,
+          "50",
+          "50",
+          "0"
+        ];
+      });
+      return binanceKlines;
+    }
+  } catch (err: any) {
+    console.warn(`[MT5 Market Data Client Error] Failed to fetch candles for ${metaSymbol} via MetaAPI:`, err.response?.data || err.message);
+  }
+  return null;
+}
+
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -42,10 +286,42 @@ async function startServer() {
   });
 
   app.get("/api/binance/klines", async (req, res) => {
-    const { symbol, interval, limit, endTime, customBaseUrl } = req.query;
+    const { symbol, interval, limit, endTime, customBaseUrl, metaApiToken, metaApiAccountId } = req.query;
     
     if (!symbol || !interval) {
       return res.status(400).json({ error: "Missing symbol or interval" });
+    }
+
+    const rawSym = String(symbol).toUpperCase().trim();
+
+    // Cache credentials if supplied by client
+    const tokenStr = metaApiToken ? String(metaApiToken).trim() : '';
+    const accIdStr = metaApiAccountId ? String(metaApiAccountId).trim() : '';
+    if (tokenStr && accIdStr) {
+      (global as any).lastMetaApiToken = tokenStr;
+      (global as any).lastMetaApiAccountId = accIdStr;
+    }
+
+    // Attempt to load from MT5 MetaAPI if credentials are in global cache or query
+    const activeMetaToken = tokenStr || (global as any).lastMetaApiToken;
+    const activeMetaAccountId = accIdStr || (global as any).lastMetaApiAccountId;
+
+    if (activeMetaToken && activeMetaAccountId) {
+      try {
+        const mt5Candles = await fetchCandlesFromMetaAPI(
+          activeMetaAccountId,
+          activeMetaToken,
+          rawSym,
+          String(interval),
+          Number(limit) || 300
+        );
+        if (mt5Candles && mt5Candles.length > 0) {
+          console.log(`[MT5 Market Data] Successfully loaded ${mt5Candles.length} candles for ${rawSym} directly from your MT5 account!`);
+          return res.json(mt5Candles);
+        }
+      } catch (err: any) {
+        console.warn(`[MT5 Market Data] MetaAPI candle load failed, falling back to Binance/Coinbase model: ${err.message}`);
+      }
     }
 
     // Set cache expiration times based on intervals
@@ -69,7 +345,6 @@ async function startServer() {
     }
     const proxyCache: Map<string, { data: any, timestamp: number }> = (global as any).proxyCache;
 
-    const rawSym = String(symbol).toUpperCase().trim();
     const cacheKey = `${rawSym}_${interval}_${limit || '300'}_${endTime || 'latest'}_${customBaseUrl || 'default'}`;
     const ttl = getCacheTTL(interval as string);
     const cachedEntry = proxyCache.get(cacheKey);
@@ -211,24 +486,37 @@ async function startServer() {
       else if (intervalStr === "1d") stepMs = 24 * 60 * 60 * 1000;
       else if (intervalStr === "1w") stepMs = 7 * 24 * 60 * 60 * 1000;
 
-      let basePrice = 2341.20;
+      let basePrice = 2420.00;
       let volatility = 0.0012;
       
       if (rawSym === 'XAUUSD' || rawSym === 'PAXGUSDT') {
-        basePrice = 2341.20;
+        basePrice = 2420.00;
         volatility = 0.0010;
       } else if (rawSym === 'BTCUSD' || rawSym === 'BTCUSDT') {
-        basePrice = 68150.00;
+        basePrice = 96500.00;
         volatility = 0.0022;
       } else if (rawSym === 'DXY') {
-        basePrice = 104.32;
+        basePrice = 104.50;
         volatility = 0.0003;
       } else if (rawSym === 'EURUSD' || rawSym === 'EURUSDT') {
-        basePrice = 1.0845;
+        basePrice = 1.0820;
         volatility = 0.0003;
       } else if (rawSym === 'USDJPY') {
-        basePrice = 156.65;
+        basePrice = 156.80;
         volatility = 0.0005;
+      }
+
+      // Proactively fetch live real-time price from unblocked pub APIs!
+      try {
+        const liveFetched = await fetchCurrentSpotPrice(rawSym);
+        if (liveFetched !== null && liveFetched > 0) {
+          console.log(`[Proxy Interceptor] Successfully fetched live spot price for ${rawSym}: ${liveFetched}`);
+          basePrice = liveFetched;
+        } else {
+          console.log(`[Proxy Interceptor] Could not fetch live spot price for ${rawSym}. Using default fallback: ${basePrice}`);
+        }
+      } catch (spotErr: any) {
+        console.warn(`[Proxy Interceptor] Spot fetch exception: ${spotErr.message}`);
       }
 
       const end = Number(endTime) || Date.now();
@@ -269,6 +557,20 @@ async function startServer() {
         ]);
         currentLoc = close;
       }
+
+      // Mathematically shift the entire fallback candle series so the latest candle's close
+      // matches our live basePrice exactly, preserving path history perfectly.
+      if (generated.length > 0) {
+        const finalClose = parseFloat(generated[generated.length - 1][4]);
+        const shift = basePrice - finalClose;
+        for (let idx = 0; idx < generated.length; idx++) {
+          generated[idx][1] = String(parseFloat(generated[idx][1]) + shift);
+          generated[idx][2] = String(parseFloat(generated[idx][2]) + shift);
+          generated[idx][3] = String(parseFloat(generated[idx][3]) + shift);
+          generated[idx][4] = String(parseFloat(generated[idx][4]) + shift);
+        }
+      }
+
       finalKlines = generated;
     }
 
@@ -278,6 +580,11 @@ async function startServer() {
 
   app.post("/api/mt5/account", async (req, res) => {
     const { mt5Login, mt5Password, mt5Server, metaApiToken, metaApiAccountId, isDemo } = req.body;
+
+    if (metaApiToken && metaApiAccountId) {
+      (global as any).lastMetaApiToken = String(metaApiToken).trim();
+      (global as any).lastMetaApiAccountId = String(metaApiAccountId).trim();
+    }
 
     if (isDemo) {
       return res.json({
