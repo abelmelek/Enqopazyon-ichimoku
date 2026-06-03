@@ -37,7 +37,12 @@ export const fetchBinanceData = async (symbol: string, interval: string, limit: 
     try {
       const customUrl = typeof window !== 'undefined' ? (localStorage.getItem('BINANCE_CUSTOM_BASE_URL') || '') : '';
       const customUrlQuery = customUrl ? `&customBaseUrl=${encodeURIComponent(customUrl)}` : '';
-      const url = `/api/binance/klines?symbol=${symbol}&interval=${interval}&limit=${limit}${endTime ? `&endTime=${endTime}` : ''}${customUrlQuery}`;
+      
+      const metaToken = typeof window !== 'undefined' ? (localStorage.getItem('MT5_META_API_TOKEN') || '') : '';
+      const metaAccountId = typeof window !== 'undefined' ? (localStorage.getItem('MT5_META_API_ACCOUNT_ID') || '') : '';
+      const metaQuery = (metaToken && metaAccountId) ? `&metaApiToken=${encodeURIComponent(metaToken)}&metaApiAccountId=${encodeURIComponent(metaAccountId)}` : '';
+
+      const url = `/api/binance/klines?symbol=${symbol}&interval=${interval}&limit=${limit}${endTime ? `&endTime=${endTime}` : ''}${customUrlQuery}${metaQuery}`;
       console.log(`[BinanceService] Proxy fetch attempt ${attempt}/${maxRetries} for ${symbol} @ ${interval}`);
       
       const response = await fetch(url, {
